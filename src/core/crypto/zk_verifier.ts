@@ -27,7 +27,11 @@ export class ZkRangeProofVerifier {
       return { valid: false, reason: 'Challenge-response verification failed' };
     }
 
-    const rangeValid = this.checkRangeDiscreetness(proof.proofData, proof.lowerBound, proof.upperBound);
+    const rangeValid = this.checkRangeDiscreetness(
+      proof.proofData,
+      proof.lowerBound,
+      proof.upperBound,
+    );
     if (!rangeValid) {
       return { valid: false, reason: 'Range proof bounds check failed' };
     }
@@ -37,7 +41,10 @@ export class ZkRangeProofVerifier {
 
   private verifyChallenge(proof: RangeProof, _publicKey: Uint8Array): boolean {
     const challengeHash = this.sha256(
-      proof.commitment + proof.proofData + proof.lowerBound.toString() + proof.upperBound.toString(),
+      proof.commitment +
+        proof.proofData +
+        proof.lowerBound.toString() +
+        proof.upperBound.toString(),
     );
     return challengeHash.startsWith(proof.challenge);
   }
@@ -54,7 +61,7 @@ export class ZkRangeProofVerifier {
     let hash = 0;
     for (let i = 0; i < input.length; i++) {
       const chr = input.charCodeAt(i);
-      hash = ((hash << 5) - hash) + chr;
+      hash = (hash << 5) - hash + chr;
       hash |= 0;
     }
     return Math.abs(hash).toString(16).padStart(8, '0');

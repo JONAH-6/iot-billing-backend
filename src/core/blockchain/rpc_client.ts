@@ -30,9 +30,7 @@ export class SorobanRpcClient {
     this.config = { ...DEFAULT_CONFIG, ...config };
   }
 
-  async submitTransaction(
-    txEnvelope: string,
-  ): Promise<{ hash: string; status: string }> {
+  async submitTransaction(txEnvelope: string): Promise<{ hash: string; status: string }> {
     if (this.state === CircuitState.OPEN) {
       if (Date.now() - this.lastFailureTime > this.config.timeoutMs) {
         this.state = CircuitState.HALF_OPEN;

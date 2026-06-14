@@ -15,7 +15,11 @@ export interface StateTransition {
 
 const VALID_TRANSITIONS: Record<IngestionState, IngestionState[]> = {
   [IngestionState.PENDING]: [IngestionState.TENTATIVE, IngestionState.FAILED],
-  [IngestionState.TENTATIVE]: [IngestionState.SETTLED, IngestionState.ROLLED_BACK, IngestionState.FAILED],
+  [IngestionState.TENTATIVE]: [
+    IngestionState.SETTLED,
+    IngestionState.ROLLED_BACK,
+    IngestionState.FAILED,
+  ],
   [IngestionState.SETTLED]: [],
   [IngestionState.ROLLED_BACK]: [],
   [IngestionState.FAILED]: [],

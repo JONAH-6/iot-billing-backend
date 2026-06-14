@@ -22,7 +22,11 @@ export class MtlsGatewayVerifier {
     try {
       const cert = new X509Certificate(peerCertificate);
       const serial = cert.serialNumber;
-      const cn = cert.subject.split('\n').find((s) => s.startsWith('CN='))?.slice(3) ?? '';
+      const cn =
+        cert.subject
+          .split('\n')
+          .find((s) => s.startsWith('CN='))
+          ?.slice(3) ?? '';
 
       if (!this.whitelist.has(serial)) {
         return {

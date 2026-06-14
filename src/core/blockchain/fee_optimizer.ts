@@ -45,9 +45,12 @@ export class FeeOptimizer {
     return optimized;
   }
 
-  private async simulateLedgerFootprint(
-    _txData: SorobanTransactionData,
-  ): Promise<{ entriesRead: number; entriesWritten: number; bytesRead: number; bytesWritten: number }> {
+  private async simulateLedgerFootprint(_txData: SorobanTransactionData): Promise<{
+    entriesRead: number;
+    entriesWritten: number;
+    bytesRead: number;
+    bytesWritten: number;
+  }> {
     return {
       entriesRead: _txData.footprint?.readOnly.length ?? 0,
       entriesWritten: _txData.footprint?.readWrite.length ?? 0,

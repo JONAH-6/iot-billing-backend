@@ -47,7 +47,9 @@ function generatePayload(device: SimulatedDevice): SignedPayload {
     },
   };
   const message = Buffer.from(JSON.stringify(base), 'utf-8');
-  const signature = Buffer.from(nacl.sign.detached(message, device.keyPair.secretKey)).toString('hex');
+  const signature = Buffer.from(nacl.sign.detached(message, device.keyPair.secretKey)).toString(
+    'hex',
+  );
   return { ...base, signature };
 }
 
@@ -103,8 +105,8 @@ async function runSimulation(
   const sortedLatencies = [...latencies].sort((a, b) => a - b);
   const n = sortedLatencies.length;
   const avgLatencyMs = n > 0 ? sortedLatencies.reduce((a, b) => a + b, 0) / n : 0;
-  const p95LatencyMs = n > 0 ? sortedLatencies[Math.floor(n * 0.95)] ?? 0 : 0;
-  const p99LatencyMs = n > 0 ? sortedLatencies[Math.floor(n * 0.99)] ?? 0 : 0;
+  const p95LatencyMs = n > 0 ? (sortedLatencies[Math.floor(n * 0.95)] ?? 0) : 0;
+  const p99LatencyMs = n > 0 ? (sortedLatencies[Math.floor(n * 0.99)] ?? 0) : 0;
 
   return {
     totalPayloads: accepted + rejected + errors,

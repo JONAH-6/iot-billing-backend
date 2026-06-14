@@ -18,7 +18,8 @@ const TIER_LIMITS: Record<string, RateLimitConfig | undefined> = {
 };
 
 export class DynamicRateLimiter {
-  private requestCounts: Map<string, { count: number; resetAt: number; blockedUntil: number }> = new Map();
+  private requestCounts: Map<string, { count: number; resetAt: number; blockedUntil: number }> =
+    new Map();
 
   checkLimit(deviceProfile: DeviceProfile): boolean {
     const now = Date.now();

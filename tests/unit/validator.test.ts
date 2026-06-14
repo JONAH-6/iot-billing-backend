@@ -3,9 +3,10 @@ import { validateSignature, SignedPayload } from '../../src/core/ingestion/valid
 import nacl from 'tweetnacl';
 import { Buffer } from 'node:buffer';
 
-function createSignedPayload(
-  overrides: Partial<SignedPayload> = {},
-): { payload: SignedPayload; publicKey: Uint8Array } {
+function createSignedPayload(overrides: Partial<SignedPayload> = {}): {
+  payload: SignedPayload;
+  publicKey: Uint8Array;
+} {
   const keyPair = nacl.sign.keyPair();
   const base: Omit<SignedPayload, 'signature'> = {
     deviceId: 'dev-001',

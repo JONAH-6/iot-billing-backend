@@ -30,7 +30,9 @@ export function loadEnv(): Env {
   if (cachedEnv) return cachedEnv;
   const parsed = envSchema.safeParse(process.env);
   if (!parsed.success) {
-    throw new Error(`Environment validation failed: ${JSON.stringify(parsed.error.flatten().fieldErrors)}`);
+    throw new Error(
+      `Environment validation failed: ${JSON.stringify(parsed.error.flatten().fieldErrors)}`,
+    );
   }
   cachedEnv = parsed.data;
   return cachedEnv;
