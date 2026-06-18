@@ -126,7 +126,7 @@ describe('SafeMath', () => {
     });
 
     it('should warn when product exceeds 80% of MAX_SOROBAN_VALUE', () => {
-      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(vi.fn());
       const highPrice = SafeMath.MAX_SOROBAN_VALUE / 2n;
       const highUnits = 2n;
       SafeMath.validatePriceMetricProduct(highPrice, highUnits);
@@ -135,7 +135,7 @@ describe('SafeMath', () => {
     });
 
     it('should not warn when product is below 80% of MAX_SOROBAN_VALUE', () => {
-      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(vi.fn());
       SafeMath.validatePriceMetricProduct(100n, 100n);
       expect(warnSpy).not.toHaveBeenCalled();
       warnSpy.mockRestore();

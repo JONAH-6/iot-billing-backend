@@ -22,7 +22,7 @@ export const SafeMath = {
     }
     if (this.checkOverflow(result)) {
       throw new PrecisionOverflowError(
-        `Conversion from ${sourceDecimals} to ${this.SOROBAN_DECIMALS} decimals overflows: rawValue=${rawValue.toString()}, result=${result.toString()}`,
+        `Conversion from ${String(sourceDecimals)} to ${String(this.SOROBAN_DECIMALS)} decimals overflows: rawValue=${rawValue.toString()}, result=${result.toString()}`,
       );
     }
     return result;
