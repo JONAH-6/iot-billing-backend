@@ -58,14 +58,14 @@ export function validateSignature(publicKey: Uint8Array, payload: SignedPayload)
       // Try reading as base64 first, fallback to hex if it's hex format
       const isHex = /^[0-9a-fA-F]+$/.test(metricValue);
       const proofBuffer = Buffer.from(metricValue, isHex ? 'hex' : 'base64');
-      
+
       const result = zkVerifier.verifyRangeProof(
         proofBuffer,
         payload.deviceId,
         range.lowerBound,
-        range.upperBound
+        range.upperBound,
       );
-      
+
       if (!result.valid) {
         return { valid: false, reason: 'PRIVACY_VIOLATION' };
       }
