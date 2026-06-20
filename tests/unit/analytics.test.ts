@@ -10,7 +10,6 @@ import {
 import * as poolManager from '../../src/database/pool_manager.js';
 import nacl from 'tweetnacl';
 import { Buffer } from 'node:buffer';
-import pg from 'pg';
 
 // Mock the verification middleware for simpler routing test
 vi.mock('../../src/api/middleware/auth.js', () => ({
@@ -21,11 +20,27 @@ vi.mock('../../src/api/middleware/auth.js', () => ({
   },
 }));
 
-// Mock pool manager functions to prevent real DB queries in unit tests
+// Mock tenant pool proxy to prevent real DB queries in unit tests
 const mockQuery = vi.fn().mockResolvedValue({ rows: [] });
-vi.spyOn(poolManager, 'getTimescalePool').mockReturnValue({
-  query: mockQuery as unknown as pg.Pool['query'],
-} as unknown as pg.Pool);
+const mockRelease = vi.fn();
+const mockConnect = vi.fn().mockResolvedValue({
+  query: mockQuery,
+  release: mockRelease,
+});
+
+vi.mock('../../src/api/middleware/tenant.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../src/api/middleware/tenant.js')>();
+  return {
+    ...actual,
+    extractTenantId: async (request: FastifyRequest, _reply: FastifyReply): Promise<void> => {
+      request.tenantId = 'test-tenant';
+      await Promise.resolve();
+    },
+    getTenantPoolProxy: (): { connect: typeof mockConnect } => ({
+      connect: mockConnect,
+    }),
+  };
+});
 
 const mockRefresh = vi.spyOn(poolManager, 'refreshAggregatesAdaptively').mockResolvedValue();
 
@@ -59,6 +74,8 @@ describe('Analytics API and Ingestion Trigger', () => {
     app = Fastify();
     registerAnalyticsRoutes(app);
     mockQuery.mockClear();
+    mockConnect.mockClear();
+    mockRelease.mockClear();
     mockRefresh.mockClear();
     resetValidatedCount();
   });
@@ -76,6 +93,7 @@ describe('Analytics API and Ingestion Trigger', () => {
       expect(response.statusCode).toBe(200);
       const body = JSON.parse(response.body) as AnalyticsResponseBody;
       expect(body.viewUsed).toBe('fifteen_minute_device_usage');
+      expect(mockConnect).toHaveBeenCalled();
       expect(mockQuery).toHaveBeenCalled();
       const sqlCall = mockQuery.mock.calls[0]?.[0] as string | undefined;
       expect(sqlCall).toContain('fifteen_minute_device_usage');

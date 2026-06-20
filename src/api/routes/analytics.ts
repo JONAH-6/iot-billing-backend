@@ -1,6 +1,11 @@
 import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
-import { getTimescalePool } from '../../database/pool_manager.js';
 import { verifyJwt } from '../middleware/auth.js';
+import {
+  extractTenantId,
+  getTenantPoolProxy,
+  isPoolContentionError,
+  sendPoolContentionResponse,
+} from '../middleware/tenant.js';
 
 interface AnalyticsQuery {
   deviceId: string;
@@ -16,7 +21,7 @@ export function registerAnalyticsRoutes(app: FastifyInstance): void {
   app.get<{ Querystring: AnalyticsQuery }>(
     '/api/analytics/telemetry',
     {
-      preHandler: verifyJwt,
+      preHandler: [verifyJwt, extractTenantId],
       schema: {
         querystring: {
           type: 'object',
@@ -70,8 +75,20 @@ export function registerAnalyticsRoutes(app: FastifyInstance): void {
         viewName = 'weekly_device_usage';
       }
 
-      const pool = getTimescalePool();
+      const tenantId = request.tenantId;
+      if (tenantId === undefined) {
+        await reply.status(400).send({
+          error: 'Bad Request',
+          message: 'Missing tenant context',
+        });
+        return;
+      }
+
+      const poolProxy = getTenantPoolProxy();
+      let client;
       try {
+        client = await poolProxy.connect(tenantId);
+
         const query = `
           SELECT 
             bucket,
@@ -87,7 +104,7 @@ export function registerAnalyticsRoutes(app: FastifyInstance): void {
           ORDER BY bucket ASC
         `;
 
-        const result = await pool.query(query, [deviceId, startDate, endDate]);
+        const result = await client.query(query, [deviceId, startDate, endDate]);
         await reply.send({
           viewUsed: viewName,
           rangeDays,
@@ -95,12 +112,18 @@ export function registerAnalyticsRoutes(app: FastifyInstance): void {
         });
         return;
       } catch (error) {
+        if (isPoolContentionError(error)) {
+          await sendPoolContentionResponse(reply, error);
+          return;
+        }
         request.log.error(error as Error, 'Analytics query failed');
         await reply.status(500).send({
           error: 'Internal Server Error',
           message: 'Failed to retrieve telemetry analytics',
         });
         return;
+      } finally {
+        client?.release();
       }
     },
   );

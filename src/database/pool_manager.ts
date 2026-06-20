@@ -1,5 +1,18 @@
 import pg from 'pg';
 import { getEnv } from '../config/env.js';
+import {
+  recordTenantPoolGrant,
+  recordTenantPoolRejection,
+  setGlobalPoolUtilization,
+  setTenantPoolActiveConnections,
+  setTenantPoolQueueDepth,
+} from '../api/metrics/prometheus.js';
+
+export const TENANT_MIN_CONNECTIONS = 2;
+export const TENANT_MAX_CONNECTIONS = 10;
+export const GLOBAL_MIN_CONNECTIONS = 10;
+export const GLOBAL_MAX_CONNECTIONS = 200;
+export const CONNECTION_WAIT_TIMEOUT_MS = 500;
 
 interface PoolMetrics {
   totalConnections: number;
@@ -8,15 +21,42 @@ interface PoolMetrics {
   utilization: number;
 }
 
+interface QueuedConnectionRequest {
+  tenantId: string;
+  resolve: (client: pg.PoolClient) => void;
+  reject: (error: Error) => void;
+  enqueuedAt: number;
+}
+
+export class PoolContentionError extends Error {
+  readonly tenantId: string;
+  readonly waitMs: number;
+
+  constructor(tenantId: string, waitMs: number) {
+    super(`Connection pool contention for tenant "${tenantId}" after ${String(waitMs)}ms`);
+    this.name = 'PoolContentionError';
+    this.tenantId = tenantId;
+    this.waitMs = waitMs;
+  }
+}
+
+export function tenantSchemaName(tenantId: string): string {
+  const sanitized = tenantId.replace(/[^a-zA-Z0-9_]/g, '').slice(0, 48);
+  if (sanitized.length === 0) {
+    throw new Error('Invalid tenant id');
+  }
+  return `tenant_${sanitized}`;
+}
+
 export class ElasticPoolManager {
   private pools = new Map<string, pg.Pool>();
-  private minConnections = 2;
-  private maxConnections = 20;
+  private globalMinConnections = GLOBAL_MIN_CONNECTIONS;
+  private globalMaxConnections = GLOBAL_MAX_CONNECTIONS;
 
   createPool(name: string, config: pg.PoolConfig): pg.Pool {
     const pool = new pg.Pool({
-      min: this.minConnections,
-      max: this.maxConnections,
+      min: this.globalMinConnections,
+      max: this.globalMaxConnections,
       ...config,
     });
 
@@ -30,6 +70,14 @@ export class ElasticPoolManager {
 
   getPool(name: string): pg.Pool | undefined {
     return this.pools.get(name);
+  }
+
+  getGlobalMin(): number {
+    return this.globalMinConnections;
+  }
+
+  getGlobalMax(): number {
+    return this.globalMaxConnections;
   }
 
   getMetrics(name: string): PoolMetrics {
@@ -57,37 +105,278 @@ export class ElasticPoolManager {
     this.pools.clear();
   }
 
-  adjustPoolSize(name: string, min: number, max: number): void {
-    const pool = this.pools.get(name);
-    if (!pool) throw new Error(`Pool "${name}" not found`);
-    this.minConnections = min;
-    this.maxConnections = max;
+  adjustPoolSize(min: number, max: number): void {
+    if (min < GLOBAL_MIN_CONNECTIONS || min > GLOBAL_MAX_CONNECTIONS) {
+      throw new Error(
+        `Global min must be between ${String(GLOBAL_MIN_CONNECTIONS)} and ${String(GLOBAL_MAX_CONNECTIONS)}`,
+      );
+    }
+    if (max < GLOBAL_MIN_CONNECTIONS || max > GLOBAL_MAX_CONNECTIONS) {
+      throw new Error(
+        `Global max must be between ${String(GLOBAL_MIN_CONNECTIONS)} and ${String(GLOBAL_MAX_CONNECTIONS)}`,
+      );
+    }
+    if (min > max) {
+      throw new Error('Global min cannot exceed global max');
+    }
+    this.globalMinConnections = min;
+    this.globalMaxConnections = max;
   }
 }
 
+export class TenantAwarePoolProxy {
+  private readonly poolName: string;
+  private readonly manager: ElasticPoolManager;
+  private readonly tenantActive = new Map<string, number>();
+  private readonly waitQueue: QueuedConnectionRequest[] = [];
+  private readonly fairOrder: string[] = [];
+  private globalActive = 0;
+  private processing = false;
+
+  constructor(manager: ElasticPoolManager, poolName: string) {
+    this.manager = manager;
+    this.poolName = poolName;
+  }
+
+  getTenantActiveCount(tenantId: string): number {
+    return this.tenantActive.get(tenantId) ?? 0;
+  }
+
+  getGlobalActiveCount(): number {
+    return this.globalActive;
+  }
+
+  getQueueDepth(): number {
+    return this.waitQueue.length;
+  }
+
+  connect(tenantId: string): Promise<pg.PoolClient> {
+    return new Promise((resolve, reject) => {
+      this.waitQueue.push({
+        tenantId,
+        resolve,
+        reject,
+        enqueuedAt: Date.now(),
+      });
+      if (!this.fairOrder.includes(tenantId)) {
+        this.fairOrder.push(tenantId);
+      }
+      this.syncMetrics();
+      void this.processQueue();
+    });
+  }
+
+  private syncMetrics(): void {
+    setTenantPoolQueueDepth(this.waitQueue.length);
+    setGlobalPoolUtilization(this.globalActive / Math.max(this.manager.getGlobalMax(), 1));
+    for (const [tenantId, active] of this.tenantActive) {
+      setTenantPoolActiveConnections(tenantId, active);
+    }
+  }
+
+  private rejectTimedOut(now: number): void {
+    for (let i = this.waitQueue.length - 1; i >= 0; i--) {
+      const request = this.waitQueue[i];
+      if (request === undefined) continue;
+      const waitMs = now - request.enqueuedAt;
+      if (waitMs >= CONNECTION_WAIT_TIMEOUT_MS) {
+        this.waitQueue.splice(i, 1);
+        recordTenantPoolRejection(request.tenantId, waitMs);
+        request.reject(new PoolContentionError(request.tenantId, waitMs));
+      }
+    }
+    this.compactFairOrder();
+    this.syncMetrics();
+  }
+
+  private compactFairOrder(): void {
+    for (let i = this.fairOrder.length - 1; i >= 0; i--) {
+      const tenantId = this.fairOrder[i];
+      if (tenantId === undefined) continue;
+      const hasPending = this.waitQueue.some((request) => request.tenantId === tenantId);
+      if (!hasPending) {
+        this.fairOrder.splice(i, 1);
+      }
+    }
+  }
+
+  private reservedForGuarantees(excludeTenantId?: string): number {
+    let reserved = 0;
+    for (const [tenantId, active] of this.tenantActive) {
+      if (tenantId === excludeTenantId) continue;
+      if (active > 0 && active < TENANT_MIN_CONNECTIONS) {
+        reserved += TENANT_MIN_CONNECTIONS - active;
+      }
+    }
+    for (const request of this.waitQueue) {
+      if (request.tenantId === excludeTenantId) continue;
+      const active = this.getTenantActiveCount(request.tenantId);
+      if (active < TENANT_MIN_CONNECTIONS) {
+        reserved += TENANT_MIN_CONNECTIONS - active;
+        break;
+      }
+    }
+    return reserved;
+  }
+
+  private canGrant(tenantId: string): boolean {
+    const tenantActive = this.getTenantActiveCount(tenantId);
+    if (tenantActive >= TENANT_MAX_CONNECTIONS) {
+      return false;
+    }
+    if (this.globalActive >= this.manager.getGlobalMax()) {
+      return false;
+    }
+    if (tenantActive < TENANT_MIN_CONNECTIONS) {
+      return true;
+    }
+    const reserved = this.reservedForGuarantees(tenantId);
+    return this.globalActive + reserved < this.manager.getGlobalMax();
+  }
+
+  private pickNextRequest(): QueuedConnectionRequest | undefined {
+    const underMinimum = this.fairOrder.filter(
+      (tenantId) => this.getTenantActiveCount(tenantId) < TENANT_MIN_CONNECTIONS,
+    );
+    const priorityTenants = underMinimum.length > 0 ? underMinimum : [...this.fairOrder];
+
+    for (const tenantId of priorityTenants) {
+      const request = this.waitQueue.find((queued) => queued.tenantId === tenantId);
+      if (request !== undefined && this.canGrant(tenantId)) {
+        return request;
+      }
+    }
+    return undefined;
+  }
+
+  private async processQueue(): Promise<void> {
+    if (this.processing) return;
+    this.processing = true;
+
+    try {
+      const pool = this.manager.getPool(this.poolName);
+      if (!pool) {
+        const error = new Error(`Pool "${this.poolName}" not found`);
+        for (const request of [...this.waitQueue]) {
+          request.reject(error);
+        }
+        this.waitQueue.length = 0;
+        this.fairOrder.length = 0;
+        this.syncMetrics();
+        return;
+      }
+
+      while (this.waitQueue.length > 0) {
+        this.rejectTimedOut(Date.now());
+        if (this.waitQueue.length === 0) {
+          break;
+        }
+
+        const next = this.pickNextRequest();
+        if (next === undefined) {
+          break;
+        }
+
+        const index = this.waitQueue.indexOf(next);
+        if (index >= 0) {
+          this.waitQueue.splice(index, 1);
+        }
+        this.compactFairOrder();
+
+        const waitMs = Date.now() - next.enqueuedAt;
+        try {
+          const client = await pool.connect();
+          const schema = tenantSchemaName(next.tenantId);
+          await client.query(`SET search_path TO ${schema}, public`);
+
+          this.globalActive += 1;
+          this.tenantActive.set(next.tenantId, this.getTenantActiveCount(next.tenantId) + 1);
+
+          const originalRelease = client.release.bind(client);
+          let released = false;
+          client.release = (releaseError?: boolean | Error): void => {
+            if (released) {
+              originalRelease(releaseError);
+              return;
+            }
+            released = true;
+            this.globalActive = Math.max(0, this.globalActive - 1);
+            const current = this.getTenantActiveCount(next.tenantId);
+            if (current <= 1) {
+              this.tenantActive.delete(next.tenantId);
+            } else {
+              this.tenantActive.set(next.tenantId, current - 1);
+            }
+            originalRelease(releaseError);
+            this.syncMetrics();
+            void this.processQueue();
+          };
+
+          recordTenantPoolGrant(next.tenantId, waitMs);
+          this.syncMetrics();
+          next.resolve(client);
+        } catch (error) {
+          next.reject(error instanceof Error ? error : new Error(String(error)));
+        }
+      }
+    } finally {
+      this.processing = false;
+      if (this.waitQueue.length > 0) {
+        setTimeout(() => {
+          void this.processQueue();
+        }, 10);
+      }
+    }
+  }
+}
+
+const TIMESCALE_POOL_NAME = 'timescale';
+
+let cachedManager: ElasticPoolManager | null = null;
+let cachedTenantProxy: TenantAwarePoolProxy | null = null;
 let cachedTimescalePool: pg.Pool | null = null;
 
-export function getTimescalePool(): pg.Pool {
-  if (cachedTimescalePool !== null) {
-    return cachedTimescalePool;
+function getPoolManager(): ElasticPoolManager {
+  if (cachedManager !== null) {
+    return cachedManager;
   }
+  cachedManager = new ElasticPoolManager();
   const env = getEnv();
-  cachedTimescalePool = new pg.Pool({
+  cachedTimescalePool = cachedManager.createPool(TIMESCALE_POOL_NAME, {
     connectionString: env.TIMESCALEDB_URL,
-    min: 2,
-    max: 20,
   });
-  cachedTimescalePool.on('error', (err: Error) => {
-    console.error('TimescaleDB pool error:', err.message);
-  });
+  return cachedManager;
+}
+
+export function getTenantPoolProxy(): TenantAwarePoolProxy {
+  if (cachedTenantProxy !== null) {
+    return cachedTenantProxy;
+  }
+  const manager = getPoolManager();
+  cachedTenantProxy = new TenantAwarePoolProxy(manager, TIMESCALE_POOL_NAME);
+  return cachedTenantProxy;
+}
+
+export function getTimescalePool(): pg.Pool {
+  getPoolManager();
+  if (cachedTimescalePool === null) {
+    throw new Error('Timescale pool not initialized');
+  }
   return cachedTimescalePool;
 }
 
 export async function closeTimescalePool(): Promise<void> {
-  if (cachedTimescalePool === null) {
-    return;
+  cachedTenantProxy = null;
+  if (cachedManager !== null) {
+    await cachedManager.drainAll();
+    cachedManager = null;
   }
-  await cachedTimescalePool.end();
+  cachedTimescalePool = null;
+}
+
+export function resetPoolManagerForTests(): void {
+  cachedTenantProxy = null;
+  cachedManager = null;
   cachedTimescalePool = null;
 }
 
@@ -112,7 +401,6 @@ export async function refreshAggregatesAdaptively(): Promise<void> {
   try {
     client = await pool.connect();
 
-    // Find bucket-aligned min and max times of raw telemetry ingested since last refresh
     const query = `
       SELECT
         time_bucket('15 minutes', MIN(time)) AS min_15m,
