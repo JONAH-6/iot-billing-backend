@@ -96,30 +96,69 @@ describe('mTLS Gateway Verifier Integration', () => {
     const tmpDir = os.tmpdir();
     const crtFile = path.join(tmpDir, `cert-${serialHex}.crt`);
     const keyFile = path.join(tmpDir, `key-${serialHex}.key`);
+    const csrFile = path.join(tmpDir, `req-${serialHex}.csr`);
+    const extFile = path.join(tmpDir, `ext-${serialHex}.cnf`);
 
+    // Write the extension file needed for the OCSP URL
+    fs.writeFileSync(extFile, `authorityInfoAccess=OCSP;URI:${ocspUrl}\n`);
+
+    // 1. Generate private key and CSR
     execFileSync('openssl', [
       'req',
-      '-x509',
+      '-new',
       '-newkey',
       'rsa:2048',
       '-keyout',
       keyFile,
       '-out',
-      crtFile,
-      '-days',
-      '365',
+      csrFile,
       '-nodes',
       '-subj',
       '/CN=TestDevice',
+    ]);
+
+    // 2. Self-sign the CSR to create the certificate with the specific serial and extension
+    execFileSync('openssl', [
+      'x509',
+      '-req',
+      '-in',
+      csrFile,
+      '-signkey',
+      keyFile,
+      '-out',
+      crtFile,
+      '-days',
+      '365',
       '-set_serial',
       `0x${serialHex}`,
-      '-addext',
-      `authorityInfoAccess=OCSP;URI:${ocspUrl}`,
+      '-extfile',
+      extFile,
     ]);
 
     const cert = fs.readFileSync(crtFile, 'utf-8');
-    fs.unlinkSync(keyFile);
-    fs.unlinkSync(crtFile);
+
+    // Clean up temp files
+    try {
+      fs.unlinkSync(keyFile);
+    } catch (e) {
+      /* ignore */
+    }
+    try {
+      fs.unlinkSync(csrFile);
+    } catch (e) {
+      /* ignore */
+    }
+    try {
+      fs.unlinkSync(crtFile);
+    } catch (e) {
+      /* ignore */
+    }
+    try {
+      fs.unlinkSync(extFile);
+    } catch (e) {
+      /* ignore */
+    }
+
     return cert;
   }
 
